@@ -299,10 +299,13 @@ class ClinicalTextProcessingAgent:
         if not isinstance(payload, dict):
             return _error_response(original_text, "The model returned an invalid JSON payload.", model_name)
 
-        entities_payload = payload.get("entities", [])
+        if "entities" not in payload:
+            return _error_response(original_text, "The model response is missing the entities field.", model_name)
+
+        entities_payload = payload["entities"]
         demographics_payload = payload.get("demographics", {})
 
-        if "entities" in payload and not isinstance(entities_payload, list):
+        if not isinstance(entities_payload, list):
             return _error_response(original_text, "The model returned an invalid entities field.", model_name)
 
         validated_entities: list[Entity] = []

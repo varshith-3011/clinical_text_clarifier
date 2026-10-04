@@ -42,6 +42,19 @@ def test_non_list_entities_returns_error_response():
     assert result.removed_by_grounding_check == 0
 
 
+def test_missing_entities_returns_error_response():
+    client = Mock()
+    client.chat.completions.create.return_value.choices = [
+        SimpleNamespace(message=SimpleNamespace(content=json.dumps({"demographics": {}})))
+    ]
+
+    result = ClinicalTextProcessingAgent(api_key="test-key", client=client).process("Patient has fever.")
+
+    assert result.status == "error"
+    assert result.error == "The model response is missing the entities field."
+    assert result.removed_by_grounding_check == 0
+
+
 def test_empty_evidence_is_not_counted_as_grounding_removal():
     payload = {
         "entities": [
