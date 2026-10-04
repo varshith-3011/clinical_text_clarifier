@@ -16,4 +16,4 @@ def is_grounded(evidence_text: str, original_text: str) -> bool:
     if not evidence or not original:
         return False
 
-    return evidence in original
+    return re.search(rf"(?<!\w){re.escape(evidence)}(?!\w)", original) is not None

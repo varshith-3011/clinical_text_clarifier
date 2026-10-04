@@ -136,7 +136,7 @@ Response:
 
 ## Grounding
 
-Evidence is verified against the original input using case-insensitive, whitespace-normalized matching. If the model returns evidence that does not appear in the original patient text, that entity is removed and counted in `removed_by_grounding_check`.
+Evidence is verified against the original input using case-insensitive, whitespace-normalized whole-word/phrase matching. If the model returns non-empty evidence that does not appear in the original patient text, that entity is removed and counted in `removed_by_grounding_check`. Entities with missing or whitespace-only evidence are discarded during validation and are not counted as grounding removals.
 
 ## Status
 

@@ -64,7 +64,7 @@ def validate_entity(raw_entity: Any) -> Entity | None:
         return None
     if status not in VALID_ENTITY_STATUSES:
         return None
-    if not isinstance(evidence_text, str):
+    if not isinstance(evidence_text, str) or not evidence_text.strip():
         return None
 
     try:
@@ -302,12 +302,14 @@ class ClinicalTextProcessingAgent:
         entities_payload = payload.get("entities", [])
         demographics_payload = payload.get("demographics", {})
 
+        if "entities" in payload and not isinstance(entities_payload, list):
+            return _error_response(original_text, "The model returned an invalid entities field.", model_name)
+
         validated_entities: list[Entity] = []
-        if isinstance(entities_payload, list):
-            for raw_entity in entities_payload:
-                entity = validate_entity(raw_entity)
-                if entity is not None:
-                    validated_entities.append(entity)
+        for raw_entity in entities_payload:
+            entity = validate_entity(raw_entity)
+            if entity is not None:
+                validated_entities.append(entity)
 
         final_entities: list[Entity] = []
         removed_by_grounding_check = 0

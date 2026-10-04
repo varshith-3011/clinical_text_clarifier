@@ -1,36 +1,107 @@
 {
-  "clinical_text": "A 56-year-old male presents with severe chest pain and sweating for 3 days. He has SOB and a history of myocardial infarction. He denies fever. He is currently taking sildenafil. An ECG was performed. Possible pneumonia is being considered.",
-  "diseases": [
-    "myocardial infarction"
-  ],
-  "symptoms": [
-    "chest pain",
-    "sweating",
-    "shortness of breath"
-  ],
-  "medications": [
-    "sildenafil"
-  ],
-  "tests": [
-    "ecg"
-  ],
-  "entities": [
-    {
-      "text": "chest pain",
-      "type": "symptom",
-      "status": "present",
-      "evidence_text": "severe chest pain",
-      "body_site": null,
-      "duration": "3 days",
-      "severity": "severe",
-      "value": null
-    }
-  ],
-  "demographics": {
-    "age": 56,
-    "sex": "male"
-  },
-  "removed_by_grounding_check": 0,
-  "model": "openai/gpt-oss-120b",
-  "status": "success"
+    "clinical_text":  "A 56-year-old male presents with severe chest pain and sweating for 3 days. He has SOB and a history of myocardial infarction. He denies fever. He is currently taking sildenafil. An ECG was performed. Possible pneumonia is being considered.",
+    "diseases":  [
+                     "myocardial infarction"
+                 ],
+    "symptoms":  [
+                     "chest pain",
+                     "sweating",
+                     "shortness of breath"
+                 ],
+    "medications":  [
+                        "sildenafil"
+                    ],
+    "tests":  [
+                  "ecg"
+              ],
+    "entities":  [
+                     {
+                         "text":  "chest pain",
+                         "type":  "symptom",
+                         "status":  "present",
+                         "evidence_text":  "severe chest pain",
+                         "body_site":  null,
+                         "duration":  "3 days",
+                         "severity":  "severe",
+                         "value":  null
+                     },
+                     {
+                         "text":  "sweating",
+                         "type":  "symptom",
+                         "status":  "present",
+                         "evidence_text":  "sweating",
+                         "body_site":  null,
+                         "duration":  "3 days",
+                         "severity":  null,
+                         "value":  null
+                     },
+                     {
+                         "text":  "shortness of breath",
+                         "type":  "symptom",
+                         "status":  "present",
+                         "evidence_text":  "SOB",
+                         "body_site":  null,
+                         "duration":  null,
+                         "severity":  null,
+                         "value":  null
+                     },
+                     {
+                         "text":  "fever",
+                         "type":  "symptom",
+                         "status":  "absent",
+                         "evidence_text":  "denies fever",
+                         "body_site":  null,
+                         "duration":  null,
+                         "severity":  null,
+                         "value":  null
+                     },
+                     {
+                         "text":  "myocardial infarction",
+                         "type":  "disease",
+                         "status":  "present",
+                         "evidence_text":  "history of myocardial infarction",
+                         "body_site":  null,
+                         "duration":  null,
+                         "severity":  null,
+                         "value":  null
+                     },
+                     {
+                         "text":  "pneumonia",
+                         "type":  "disease",
+                         "status":  "possible",
+                         "evidence_text":  "Possible pneumonia",
+                         "body_site":  null,
+                         "duration":  null,
+                         "severity":  null,
+                         "value":  null
+                     },
+                     {
+                         "text":  "sildenafil",
+                         "type":  "medication",
+                         "status":  "present",
+                         "evidence_text":  "sildenafil",
+                         "body_site":  null,
+                         "duration":  null,
+                         "severity":  null,
+                         "value":  null
+                     },
+                     {
+                         "text":  "ECG",
+                         "type":  "test",
+                         "status":  "present",
+                         "evidence_text":  "ECG",
+                         "body_site":  null,
+                         "duration":  null,
+                         "severity":  null,
+                         "value":  null
+                     }
+                 ],
+    "demographics":  {
+                         "age":  56,
+                         "sex":  "male"
+                     },
+    "removed_by_grounding_check":  0,
+    "model":  "openai/gpt-oss-120b",
+    "status":  "success",
+    "error":  null
 }
