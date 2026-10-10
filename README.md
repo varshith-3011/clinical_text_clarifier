@@ -32,6 +32,7 @@ Final Structured Output
 - present/absent/possible status
 - evidence grounding
 - demographics capture
+- explicitly stated clinical events
 - no local Hugging Face models
 
 ## Installation
@@ -124,19 +125,24 @@ Response:
       "value": null
     }
   ],
+  "clinical_events": [],
   "demographics": {
     "age": 56,
-    "sex": "male"
+    "age_unit": null,
+    "sex": "male",
+    "pregnancy_status": null,
+    "gestational_age": null
   },
   "removed_by_grounding_check": 0,
   "model": "openai/gpt-oss-120b",
-  "status": "success"
+  "status": "success",
+  "error": null
 }
 ```
 
 ## Grounding
 
-Evidence is verified against the original input using case-insensitive, whitespace-normalized whole-word/phrase matching. If the model returns non-empty evidence that does not appear in the original patient text, that entity is removed and counted in `removed_by_grounding_check`. Entities with missing or whitespace-only evidence are discarded during validation and are not counted as grounding removals.
+Evidence is verified against the original input using case-insensitive, whitespace-normalized whole-word/phrase matching. If the model returns non-empty evidence that does not appear in the original patient text, that entity or clinical event is removed and counted in `removed_by_grounding_check`. Items with missing or whitespace-only evidence are discarded during validation and are not counted as grounding removals.
 
 ## Status
 
@@ -148,7 +154,9 @@ Entity status values are:
 
 ## Main lists
 
-The primary lists (`diseases`, `symptoms`, `medications`, and `tests`) contain only entities whose status is `present` and whose evidence is grounded in the original text.
+The primary lists contain only grounded entities with `present` status. `symptoms` is shaped for downstream phenotype matching: it includes present symptom entities plus test entities explicitly classified during extraction as clinical findings and grounded in their evidence. Tests without an explicit finding classification, including procedures, are not projected into `symptoms`. Projected test findings retain `type: "test"` in `entities` and remain in `tests`. Absent and possible entities are never included in these present-finding lists. The test classification is internal extraction metadata and is not part of the serialized response schema. The downstream Knowledge Graph consumer is not included here, so this repository does not verify the integration.
+
+The existing entity types and statuses are unchanged. Explicit events that do not fit those entity types (for example, a death event) are returned separately in `clinical_events`, with their status and grounded evidence. Demographics retains `age` and `sex` and also reports an explicitly stated `age_unit`, `pregnancy_status`, or `gestational_age` when available. These are additive response fields.
 
 ## Important limitation
 
@@ -156,8 +164,18 @@ This system extracts and structures information explicitly stated in the text. I
 
 ## Knowledge Graph integration
 
-This module does not generate ICD-10 or SNOMED codes. Standard vocabulary mapping is handled by the downstream Knowledge Graph component.
+This module does not generate ICD-10 or SNOMED codes. Vocabulary mapping and downstream consumer behavior are outside this repository and have not been verified here.
 
 ## Model
 
 The model is configurable through `CLINICAL_TEXT_MODEL`, which defaults to `openai/gpt-oss-120b`. This project does not claim to reproduce a specific published implementation exactly and does not claim any specific performance metrics.
+
+## Repeatability check
+
+With `GROQ_API_KEY` configured, compare three consecutive production-path extractions of identical test text:
+
+```powershell
+python testing/run_determinism.py --text "The patient has a cough and an elevated ESR."
+```
+
+The request uses temperature 0 and seed 42. The installed Groq SDK and the configured model accepted the seed parameter during validation, but a seed and temperature 0 do not guarantee identical output across provider or model changes. The report records request attempts, retries, complete public responses, and output differences; it is written to a uniquely named JSON file. Use synthetic or otherwise approved text because the report contains the input and extracted output.

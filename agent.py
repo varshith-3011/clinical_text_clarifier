@@ -1,6 +1,7 @@
 import json
 import re
-from typing import Any, Iterable
+from dataclasses import dataclass
+from typing import Any, Iterable, Literal
 
 from groq import (
     APIConnectionError,
@@ -19,12 +20,39 @@ from config import CLINICAL_TEXT_MODEL, require_groq_api_key
 from grounding import is_grounded
 from preprocess import clean_text
 from schemas import (
+    ClinicalEvent,
     Demographics,
     Entity,
     FinalStructuredResponse,
     VALID_ENTITY_STATUSES,
     VALID_ENTITY_TYPES,
 )
+
+TestClassification = Literal["finding", "procedure"]
+VALID_TEST_CLASSIFICATIONS = {"finding", "procedure"}
+NUMERIC_UNIT_AFTER_VALUE = re.compile(
+    r"(?P<separator>\s*)(?P<unit>"
+    r"°\s*[CF]|%|"
+    r"/(?:min(?:ute)?|hr|hour|sec(?:ond)?|s|day|mm(?:3|³)|uL|µL|μL|mL|L|kg|m2)|"
+    r"mm\s*Hg|cm\s*H2O|bpm|beats?\s*/\s*min|"
+    r"seconds?|secs?|minutes?|mins?|hours?|days?|weeks?|months?|years?|"
+    r"(?:mg|mcg|µg|μg|g|mmol|mEq|IU|U|mL|dL|kg|cm|mm)"
+    r"(?:\s*/\s*(?:dL|mL|L|kg|m2))?"
+    r")(?=$|[\s,;.)])",
+    re.IGNORECASE,
+)
+PAIRED_TEMPERATURE_AFTER_UNIT = re.compile(
+    r"\s*\(\s*\d+(?:\.\d+)?\s*°\s*[CF]\s*\)",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class _ExtractedEntity:
+    entity: Entity
+    test_classification: TestClassification | None = None
+    test_classification_missing: bool = True
+    kg_finding_text: str | None = None
 
 
 def normalize_entity_name(value: Any) -> str:
@@ -33,6 +61,30 @@ def normalize_entity_name(value: Any) -> str:
 
     normalized = " ".join(str(value).strip().lower().split())
     return normalized
+
+
+def _stringify_numeric_value(value: int | float, evidence_text: str) -> str:
+    value_text = str(value)
+    number_pattern = re.compile(
+        rf"(?<![\w.]){re.escape(value_text)}(?![\w.])",
+        re.IGNORECASE,
+    )
+    number_match = number_pattern.search(evidence_text)
+    if number_match is None:
+        return value_text
+
+    unit_match = NUMERIC_UNIT_AFTER_VALUE.match(evidence_text[number_match.end():])
+    if unit_match is None:
+        return value_text
+    unit_text = unit_match.group("unit")
+    unit_end = number_match.end() + unit_match.end()
+    if unit_text.lstrip().startswith("°"):
+        paired_temperature = PAIRED_TEMPERATURE_AFTER_UNIT.match(
+            evidence_text[unit_end:]
+        )
+        if paired_temperature is not None:
+            unit_text += paired_temperature.group()
+    return f"{value_text}{unit_match.group('separator')}{unit_text}"
 
 
 def deduplicate_strings(values: Iterable[str]) -> list[str]:
@@ -50,6 +102,11 @@ def deduplicate_strings(values: Iterable[str]) -> list[str]:
 
 
 def validate_entity(raw_entity: Any) -> Entity | None:
+    extracted_entity = _validate_extracted_entity(raw_entity)
+    return extracted_entity.entity if extracted_entity is not None else None
+
+
+def _validate_extracted_entity(raw_entity: Any) -> _ExtractedEntity | None:
     if not isinstance(raw_entity, dict):
         return None
 
@@ -68,7 +125,10 @@ def validate_entity(raw_entity: Any) -> Entity | None:
         return None
 
     try:
-        return Entity(
+        value = raw_entity.get("value")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            value = _stringify_numeric_value(value, evidence_text)
+        entity = Entity(
             text=text.strip(),
             type=entity_type,
             status=status,
@@ -76,10 +136,58 @@ def validate_entity(raw_entity: Any) -> Entity | None:
             body_site=raw_entity.get("body_site"),
             duration=raw_entity.get("duration"),
             severity=raw_entity.get("severity"),
-            value=raw_entity.get("value"),
+            value=value,
         )
     except Exception:
         return None
+
+    classification_missing = "test_classification" not in raw_entity
+    raw_classification = raw_entity.get("test_classification")
+    test_classification: TestClassification | None = None
+    if (
+        entity.type == "test"
+        and isinstance(raw_classification, str)
+        and raw_classification in VALID_TEST_CLASSIFICATIONS
+    ):
+        test_classification = raw_classification
+
+    raw_kg_finding_text = raw_entity.get("kg_finding_text")
+    kg_finding_text = (
+        raw_kg_finding_text.strip()
+        if entity.type == "test"
+        and isinstance(raw_kg_finding_text, str)
+        and raw_kg_finding_text.strip()
+        else None
+    )
+
+    return _ExtractedEntity(
+        entity=entity,
+        test_classification=test_classification,
+        test_classification_missing=classification_missing,
+        kg_finding_text=kg_finding_text,
+    )
+
+
+def validate_clinical_event(raw_event: Any) -> ClinicalEvent | None:
+    if not isinstance(raw_event, dict):
+        return None
+
+    text = raw_event.get("text")
+    status = raw_event.get("status")
+    evidence_text = raw_event.get("evidence_text")
+
+    if not isinstance(text, str) or not text.strip():
+        return None
+    if status not in VALID_ENTITY_STATUSES:
+        return None
+    if not isinstance(evidence_text, str) or not evidence_text.strip():
+        return None
+
+    return ClinicalEvent(
+        text=text.strip(),
+        status=status,
+        evidence_text=evidence_text.strip(),
+    )
 
 
 def filter_present_entities(entities: Iterable[Entity]) -> list[str]:
@@ -87,7 +195,7 @@ def filter_present_entities(entities: Iterable[Entity]) -> list[str]:
     return deduplicate_strings(entity.text for entity in present_entities)
 
 
-def _build_main_lists(entities: list[Entity]) -> dict[str, list[str]]:
+def _build_main_lists(entities: list[_ExtractedEntity]) -> dict[str, list[str]]:
     grouped: dict[str, list[str]] = {
         "diseases": [],
         "symptoms": [],
@@ -95,13 +203,35 @@ def _build_main_lists(entities: list[Entity]) -> dict[str, list[str]]:
         "tests": [],
     }
     seen_by_type: dict[str, set[str]] = {key: set() for key in grouped}
-
-    for entity in entities:
-        if entity.status != "present":
-            continue
-
+    statuses_by_name: dict[str, set[str]] = {}
+    for extracted_entity in entities:
+        entity = extracted_entity.entity
         normalized_name = normalize_entity_name(entity.text)
-        if not normalized_name:
+        if normalized_name:
+            statuses_by_name.setdefault(normalized_name, set()).add(entity.status)
+    conflicting_symptom_names = {
+        name
+        for name, statuses in statuses_by_name.items()
+        if "present" in statuses and "absent" in statuses
+    }
+
+    def append_unique(
+        list_name: str, text: str, conflict_name: str | None = None
+    ) -> None:
+        normalized_name = normalize_entity_name(text)
+        if not normalized_name or normalized_name in seen_by_type[list_name]:
+            return
+        if list_name == "symptoms" and (
+            normalized_name in conflicting_symptom_names
+            or normalize_entity_name(conflict_name) in conflicting_symptom_names
+        ):
+            return
+        seen_by_type[list_name].add(normalized_name)
+        grouped[list_name].append(normalized_name)
+
+    for extracted_entity in entities:
+        entity = extracted_entity.entity
+        if entity.status != "present":
             continue
 
         key_name = entity.type + "s"
@@ -114,23 +244,34 @@ def _build_main_lists(entities: list[Entity]) -> dict[str, list[str]]:
         elif entity.type == "test":
             key_name = "tests"
 
-        if normalized_name in seen_by_type[key_name]:
-            continue
-
-        seen_by_type[key_name].add(normalized_name)
-        grouped[key_name].append(normalized_name)
+        append_unique(key_name, entity.text)
+        if entity.type == "test":
+            if extracted_entity.test_classification == "finding":
+                symptom_text = entity.text
+                if (
+                    extracted_entity.kg_finding_text
+                    and is_grounded(
+                        extracted_entity.kg_finding_text, entity.evidence_text
+                    )
+                ):
+                    symptom_text = extracted_entity.kg_finding_text
+                elif is_grounded(entity.text, entity.evidence_text):
+                    symptom_text = entity.text
+                append_unique("symptoms", symptom_text, conflict_name=entity.text)
 
     return grouped
 
 
 def _parse_demographics(payload: Any) -> Demographics:
     if not isinstance(payload, dict):
-        return Demographics(age=None, sex=None)
+        return Demographics()
 
     age_value = payload.get("age")
+    age_unit_value = payload.get("age_unit")
     sex_value = payload.get("sex")
 
     age: int | None = None
+    age_unit: str | None = None
     if isinstance(age_value, bool):
         age = None
     elif isinstance(age_value, (int, float)):
@@ -141,14 +282,49 @@ def _parse_demographics(payload: Any) -> Demographics:
             try:
                 age = int(stripped)
             except ValueError:
-                age = None
+                age_match = re.fullmatch(
+                    r"(\d+)\s*[- ]?(year|month|week|day)s?(?:[- ]?old)?",
+                    stripped,
+                    flags=re.IGNORECASE,
+                )
+                if age_match:
+                    age = int(age_match.group(1))
+                    age_unit = f"{age_match.group(2).lower()}s"
+    if isinstance(age_unit_value, str) and age_unit_value.strip():
+        normalized_age_unit = age_unit_value.strip().lower().rstrip("s")
+        age_unit = {
+            "year": "years",
+            "month": "months",
+            "week": "weeks",
+            "day": "days",
+        }.get(normalized_age_unit)
 
     sex: str | None = None
     if isinstance(sex_value, str):
         normalized_sex = sex_value.strip().lower()
         sex = normalized_sex if normalized_sex in {"male", "female"} else None
 
-    return Demographics(age=age, sex=sex)
+    pregnancy_status = payload.get("pregnancy_status")
+    if isinstance(pregnancy_status, str):
+        pregnancy_status = pregnancy_status.strip().lower()
+        if pregnancy_status not in {"pregnant", "not pregnant"}:
+            pregnancy_status = None
+    else:
+        pregnancy_status = None
+
+    gestational_age = payload.get("gestational_age")
+    if isinstance(gestational_age, str):
+        gestational_age = gestational_age.strip() or None
+    else:
+        gestational_age = None
+
+    return Demographics(
+        age=age,
+        age_unit=age_unit,
+        sex=sex,
+        pregnancy_status=pregnancy_status,
+        gestational_age=gestational_age,
+    )
 
 
 def _error_response(original_text: str, message: str, model_name: str) -> FinalStructuredResponse:
@@ -159,7 +335,8 @@ def _error_response(original_text: str, message: str, model_name: str) -> FinalS
         medications=[],
         tests=[],
         entities=[],
-        demographics=Demographics(age=None, sex=None),
+        clinical_events=[],
+        demographics=Demographics(),
         removed_by_grounding_check=0,
         model=model_name,
         status="error",
@@ -246,7 +423,12 @@ class ClinicalTextProcessingAgent:
                 "EXTRACTION RULES:\n"
                 "Extract every clinically relevant item explicitly supported by the input. Allowed entity types are only disease, symptom, medication, and test. "
                 "Give every entity exactly one status: present, absent, or possible. Never diagnose or infer unsupported information, and do not add a disease merely because symptoms suggest it. "
+                "Distinguish a named disease diagnosis from a phenotype finding: do not use disease as a catchall for an unfamiliar or disorder-like term. If the source presents an item as an observed clinical finding or manifestation rather than a disease diagnosis, classify it as symptom; classify laboratory and diagnostic test findings as test with test_classification finding. Do not turn a stated diagnosis into a symptom solely to increase coverage. "
                 "If the text says a condition is suspected, possible, considered, or being evaluated, use possible. A condition explicitly described as patient history is present unless the text says it is absent or resolved.\n"
+                "\n"
+                "Extract other explicitly stated clinical events, such as death, in clinical_events rather than misclassifying them as a disease or symptom. "
+                "Only include events that the input states actually occurred; provide text, status, and exact evidence_text for each.\n"
+                "In MedQA-style input, extract facts from the clinical vignette only. Do not answer the question, choose an option, or treat a hypothetical question or answer choices as clinical findings.\n"
                 "\n"
                 "ABBREVIATIONS AND NORMALIZATION:\n"
                 "Expand standard clinical abbreviations only when their meaning is clear, such as HTN to hypertension, DM to diabetes mellitus, SOB to shortness of breath, and ECG to electrocardiogram. "
@@ -254,28 +436,40 @@ class ClinicalTextProcessingAgent:
                 "\n"
                 "ENTITY BOUNDARIES AND DETAILS:\n"
                 "Do not create separate symptom entities for attributes, modifiers, or manifestations that describe one primary symptom. For example, in severe chest pain radiating to the left arm, extract chest pain as the symptom and do not create a separate radiation symptom. "
-                "Preserve explicitly stated body_site, duration, severity, and value in their corresponding fields whenever appropriate. Do not invent details; use null when not explicitly supported.\n"
+                "Do not shorten, paraphrase, or drop clinically meaningful parts of a finding. Preserve the complete source finding phrase, including anatomical location and meaningful qualifiers such as duration, measurement, abnormality direction, and positive-test wording. "
+                "Use the complete source finding phrase as the entity text, not a generic base name when the source includes a meaningful qualifier. Keep evidence_text to the shortest exact source span that contains the complete finding phrase, without surrounding narrative or neighboring findings. "
+                "Preserve explicitly stated body_site, duration, severity, and value in their corresponding fields whenever appropriate. For any explicitly stated vital sign or numeric laboratory measurement, put the measurement value and its unit as a string in value, preserving the complete reported measurement, including paired-unit forms when stated (for example, 38.0°C (100.4°F), 112/min, 150/90 mm Hg, or 43 seconds). Do not put a measurement in value unless the source states it. "
+                "Assign value only when the source states a result or measurement that genuinely belongs to that specific test or measurement; do not attach a nearby sentence or an unrelated event as its value. "
+                "For a procedure with no stated result, use null. Do not invent details; use null when not explicitly supported.\n"
                 "\n"
                 "MEDICATIONS AND TESTS:\n"
                 "Extract every explicitly mentioned medication as its own entity. For example, if the patient takes aspirin and metformin, return both aspirin and metformin. Do not omit later items in a list. "
-                "Extract each explicitly mentioned test individually, including ECG, chest X-ray, MRI, CT, and blood tests. When a test or clinical measurement has an explicitly stated result or measurement, preserve it in value when appropriate; for example, represent an explicitly stated blood pressure as a test/measurement with its literal value.\n"
+                "Extract each explicitly mentioned test individually, including ECG, chest X-ray, MRI, CT, and blood tests. Keep laboratory measurements and diagnostic test findings typed as test; do not relabel them as symptoms. "
+                "For each test entity, set the internal test_classification to finding only when the source explicitly reports a clinical, laboratory, or diagnostic finding; this includes named abnormalities such as anaemia even when no numeric value is stated. "
+                "For a test classified as finding, set the internal kg_finding_text to the complete source phrase for that one finding only, copied exactly from its evidence_text; exclude surrounding narrative and neighboring findings. Use null when the source does not support one exact finding phrase. "
+                "Set it to procedure when an investigation or procedure is mentioned without a reported finding. Do not infer a finding from a procedure name, and do not invent a result, measurement, or value. "
+                "Keep status separate from classification: explicitly abnormal or positive findings are present, explicitly normal or negative findings are absent, and uncertain findings are possible. "
+                "A test procedure without a stated finding may be present as a test but must have value null. For older or uncertain cases, leave test_classification null rather than guessing.\n"
                 "\n"
                 "HISTORY AND NEGATION:\n"
                 "Do not turn lifestyle or history statements into diseases. A statement such as no history of smoking must not produce a tobacco-use disease entity. "
                 "Represent explicitly negated clinical findings as absent, not present; for example, denies fever means fever / symptom / absent, and no cough means cough / symptom / absent.\n"
                 "\n"
                 "DEMOGRAPHICS:\n"
-                "Extract age and sex only when explicitly stated. Return age as an integer and sex as male or female when stated; otherwise use null for each missing value.\n"
+                "Extract age and sex only when explicitly stated. Return age as an integer and preserve its unit in age_unit (years, months, weeks, or days) when stated; otherwise use null for each missing value. "
+                "Do not interpret gestational age as the patient's age. Record explicitly stated pregnancy as pregnancy_status ('pregnant' or 'not pregnant') and preserve gestational_age with its unit, such as '22 weeks'. Use null when not stated.\n"
                 "\n"
                 "EVIDENCE_TEXT (REQUIRED):\n"
-                "Every entity must have evidence_text containing an exact, contiguous substring copied from the ORIGINAL INPUT TEXT. Do not paraphrase, summarize, rewrite, normalize, expand abbreviations, invent wording, or join non-contiguous text. "
+                "Every entity and clinical event must have evidence_text containing an exact, contiguous substring copied from the ORIGINAL INPUT TEXT. Do not paraphrase, summarize, rewrite, normalize, expand abbreviations, invent wording, or join non-contiguous text. "
                 "The normalized entity text may differ from the source wording, but evidence_text must occur literally in the original input. For example, if the input says associated with SOB, use that exact wording as evidence, not associated with shortness of breath. "
                 "Multiple entities may share overlapping evidence when the same exact phrase supports them.\n"
                 "\n"
                 "OUTPUT FORMAT:\n"
-                "Return only valid JSON, with no markdown, explanation, or commentary. The top-level object must contain exactly entities and demographics. "
-                "demographics must contain exactly age and sex. Each entity must contain exactly text, type, status, evidence_text, body_site, duration, severity, and value. "
-                "Use null for any unsupported detail. Do not add other keys."
+                "Return only valid JSON, with no markdown, explanation, or commentary. The top-level object must contain exactly entities, clinical_events, and demographics. "
+                "demographics must contain exactly age, age_unit, sex, pregnancy_status, and gestational_age. Each entity must contain exactly text, type, status, evidence_text, body_site, duration, severity, value, test_classification, and kg_finding_text. "
+                "For non-test entities, test_classification must be null. For test entities, it must be finding, procedure, or null when the source does not support a reliable choice. This field is internal extraction metadata and must not be added to public response entities. "
+                "kg_finding_text is also internal extraction metadata and must never be added to public response entities. Set it to null for non-test entities and procedures. "
+                "Each clinical event must contain exactly text, status, and evidence_text. Use null for any unsupported detail and an empty array when there are no clinical events. Do not add other keys."
             )
 
             response = client.chat.completions.create(
@@ -286,6 +480,7 @@ class ClinicalTextProcessingAgent:
                 ],
                 temperature=0,
                 response_format={"type": "json_object"},
+                seed=42,
             )
 
             content = response.choices[0].message.content
@@ -304,24 +499,41 @@ class ClinicalTextProcessingAgent:
 
         entities_payload = payload["entities"]
         demographics_payload = payload.get("demographics", {})
+        clinical_events_payload = payload.get("clinical_events", [])
 
         if not isinstance(entities_payload, list):
             return _error_response(original_text, "The model returned an invalid entities field.", model_name)
+        if not isinstance(clinical_events_payload, list):
+            return _error_response(original_text, "The model returned an invalid clinical_events field.", model_name)
 
-        validated_entities: list[Entity] = []
+        validated_entities: list[_ExtractedEntity] = []
         for raw_entity in entities_payload:
-            entity = validate_entity(raw_entity)
-            if entity is not None:
-                validated_entities.append(entity)
+            extracted_entity = _validate_extracted_entity(raw_entity)
+            if extracted_entity is not None:
+                validated_entities.append(extracted_entity)
 
-        final_entities: list[Entity] = []
+        validated_events: list[ClinicalEvent] = []
+        for raw_event in clinical_events_payload:
+            event = validate_clinical_event(raw_event)
+            if event is not None:
+                validated_events.append(event)
+
+        final_entities: list[_ExtractedEntity] = []
+        final_events: list[ClinicalEvent] = []
         removed_by_grounding_check = 0
 
-        for entity in validated_entities:
+        for extracted_entity in validated_entities:
+            entity = extracted_entity.entity
             if not is_grounded(entity.evidence_text, original_text):
                 removed_by_grounding_check += 1
                 continue
-            final_entities.append(entity)
+            final_entities.append(extracted_entity)
+
+        for event in validated_events:
+            if not is_grounded(event.evidence_text, original_text):
+                removed_by_grounding_check += 1
+                continue
+            final_events.append(event)
 
         main_lists = _build_main_lists(final_entities)
         demographics = _parse_demographics(demographics_payload)
@@ -332,7 +544,8 @@ class ClinicalTextProcessingAgent:
             symptoms=main_lists["symptoms"],
             medications=main_lists["medications"],
             tests=main_lists["tests"],
-            entities=final_entities,
+            entities=[extracted_entity.entity for extracted_entity in final_entities],
+            clinical_events=final_events,
             demographics=demographics,
             removed_by_grounding_check=removed_by_grounding_check,
             model=model_name,

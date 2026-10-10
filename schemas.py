@@ -25,7 +25,18 @@ class Entity(BaseModel):
 
 class Demographics(BaseModel):
     age: Optional[int] = None
+    age_unit: Optional[str] = None
     sex: Optional[str] = None
+    pregnancy_status: Optional[str] = None
+    gestational_age: Optional[str] = None
+
+    model_config = ConfigDict(extra="ignore")
+
+
+class ClinicalEvent(BaseModel):
+    text: str
+    status: str
+    evidence_text: str
 
     model_config = ConfigDict(extra="ignore")
 
@@ -37,6 +48,7 @@ class FinalStructuredResponse(BaseModel):
     medications: list[str] = []
     tests: list[str] = []
     entities: list[Entity] = []
+    clinical_events: list[ClinicalEvent] = []
     demographics: Demographics = Demographics(age=None, sex=None)
     removed_by_grounding_check: int = 0
     model: str = "openai/gpt-oss-120b"
